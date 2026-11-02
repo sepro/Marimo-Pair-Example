@@ -1,0 +1,35 @@
+[project]
+name = "marimo-pair-demo"
+version = "0.1.0"
+description = "Pair with Claude Code on marimo notebooks inside a VS Code dev container."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "marimo>=0.17",
+    "polars>=1.30",
+    "altair>=5.5",
+    "numpy>=2.3",
+    "scipy>=1.16",
+    "statsmodels>=0.15.0",
+    "pandas>=3.1.0",
+    "lorepy>=0.5.0",
+    "matplotlib>=3.11.2",
+    "phik>=0.12.5",
+    "shap>=0.54.1",
+    "scikit-learn>=1.9.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4",
+    "ruff>=0.13",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

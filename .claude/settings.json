@@ -1,0 +1,10 @@
+{
+  "extraKnownMarketplaces": {
+    "marimo-pair": {
+      "source": { "source": "github", "repo": "marimo-team/marimo-pair" }
+    }
+  },
+  "enabledPlugins": {
+    "marimo-pair@marimo-pair": true
+  }
+}

@@ -14,9 +14,18 @@ dist/
 .ruff_cache/
 .mypy_cache/
 .ipynb_checkpoints/
+.cache/
+.uv-cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
 
-# marimo
+# marimo (session/state caches)
 __marimo__/
+**/__marimo__/
 .marimo/
 
 # Claude Code (keep shared project settings, ignore personal ones)

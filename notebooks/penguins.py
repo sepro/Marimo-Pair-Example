@@ -20,6 +20,7 @@ def _():
     from scipy.cluster import hierarchy
     from scipy.spatial.distance import squareform
     from sklearn.base import clone
+    from sklearn.decomposition import PCA
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.inspection import permutation_importance
     from sklearn.linear_model import LogisticRegression
@@ -37,6 +38,7 @@ def _():
 
     return (
         LogisticRegression,
+        PCA,
         RandomForestClassifier,
         RepeatedStratifiedKFold,
         StandardScaler,
@@ -80,12 +82,13 @@ def _(mo):
 
     1. The data
     2. Interactive exploration
-    3. How the variables relate (φK correlation with clustering)
+    3. How the variables relate (φK correlation with clustering; Spearman rank correlation)
     4. Sex differences within species (two-way ANOVA)
     5. Species along each measurement (lorepy)
     6. Predicting species (cross-validated classifier)
     7. Which measurements drive the prediction (permutation importance, SHAP)
-    8. Discussion
+    8. Principal component analysis (interactive biplot)
+    9. Discussion
 
     Data: [palmerpenguins](https://allisonhorst.github.io/palmerpenguins/) (CC0), downloaded by
     `scripts/download_data.py`. Except in Section 2, every analysis uses all complete cases and
@@ -413,6 +416,172 @@ def _(mo):
     Year is nearly unrelated to everything. The one exception is a weak link with flipper
     length (φK = 0.33, Z ≈ 3.3), which could be a real change over time or a change in how
     flippers were measured between field seasons.
+    """),
+        kind="info",
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Spearman rank correlation between measurements
+
+    φK has no sign and mixes categorical with continuous variables. For the four body
+    measurements alone, Spearman's ρ gives the **direction** as well as the strength of each
+    relationship. It ranks the values first, so it captures any monotonic trend and is robust
+    to outliers. ρ runs from −1 (perfectly opposite ranking) through 0 to +1 (identical ranking).
+
+    Pick the measurements to compare and whether to pool all species or look within one.
+    **Cell label** switches the numbers printed in the cells between ρ, the raw p-value and the
+    FDR-adjusted p-value (Benjamini–Hochberg, over the pairs shown); colour always shows ρ.
+    In ρ mode, cells marked * are significant after Holm correction (p < 0.05). Hover a cell
+    for n and all p-values.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo, numeric_cols, penguins):
+    spearman_features = mo.ui.multiselect(numeric_cols, value=numeric_cols, label="Features")
+    spearman_scope = mo.ui.dropdown(
+        ["All species (pooled)", *sorted(penguins["species"].unique().to_list())],
+        value="All species (pooled)",
+        label="Penguins",
+    )
+    spearman_label = mo.ui.radio(
+        ["ρ", "p-value", "FDR p-value"], value="ρ", label="Cell label", inline=True
+    )
+    mo.hstack([spearman_features, spearman_scope, spearman_label], justify="start", gap=2)
+    return spearman_features, spearman_label, spearman_scope
+
+
+@app.cell
+def _(
+    mo,
+    multipletests,
+    numeric_cols,
+    penguins,
+    pl,
+    spearman_features,
+    spearman_scope,
+    stats,
+):
+    mo.stop(
+        len(spearman_features.value) < 2,
+        mo.callout(mo.md("Select at least two features."), kind="warn"),
+    )
+    # Keep the notebook's column order regardless of the order features were picked in.
+    spearman_cols = [_c for _c in numeric_cols if _c in spearman_features.value]
+    _data = (
+        penguins
+        if spearman_scope.value == "All species (pooled)"
+        else penguins.filter(pl.col("species") == spearman_scope.value)
+    )
+    _pairs = [(_a, _b) for _i, _a in enumerate(spearman_cols) for _b in spearman_cols[_i + 1 :]]
+    _tests = {(_a, _b): stats.spearmanr(_data[_a], _data[_b]) for _a, _b in _pairs}
+    _pvals = [_t.pvalue for _t in _tests.values()]
+    _p_holm = dict(zip(_pairs, multipletests(_pvals, method="holm")[1]))
+    _p_fdr = dict(zip(_pairs, multipletests(_pvals, method="fdr_bh")[1]))
+
+    _rows = []
+    for _a in spearman_cols:
+        for _b in spearman_cols:
+            _key = (_a, _b) if (_a, _b) in _tests else (_b, _a)
+            _diag = _a == _b
+            _rows.append(
+                {
+                    "var1": _a,
+                    "var2": _b,
+                    "rho": 1.0 if _diag else float(_tests[_key].statistic),
+                    "p": None if _diag else float(_tests[_key].pvalue),
+                    "p_holm": None if _diag else float(_p_holm[_key]),
+                    "p_fdr": None if _diag else float(_p_fdr[_key]),
+                }
+            )
+    spearman_long = pl.DataFrame(_rows).with_columns(n=pl.lit(_data.height))
+    return spearman_cols, spearman_long
+
+
+@app.cell(hide_code=True)
+def _(
+    alt,
+    mo,
+    pl,
+    spearman_cols,
+    spearman_label,
+    spearman_long,
+    spearman_scope,
+):
+    # Text shown in each cell; colour always encodes ρ. The diagonal has no p-value.
+    _fmt_p = lambda v: f"{v:.1e}"
+    if spearman_label.value == "ρ":
+        _label = pl.col("rho").round(2).cast(pl.String) + pl.when(pl.col("p_holm") < 0.05).then(
+            pl.lit("*")
+        ).otherwise(pl.lit(""))
+        _caption = "cell labels show ρ; * = Holm-adjusted p < 0.05"
+    else:
+        _pcol = "p" if spearman_label.value == "p-value" else "p_fdr"
+        _label = pl.col(_pcol).map_elements(_fmt_p, return_dtype=pl.String).fill_null("–")
+        _caption = (
+            "cell labels show raw p-values"
+            if _pcol == "p"
+            else "cell labels show FDR-adjusted p-values (Benjamini–Hochberg)"
+        )
+    _plot_data = spearman_long.with_columns(label=_label)
+
+    _base = alt.Chart(_plot_data).encode(
+        x=alt.X("var2:N", sort=spearman_cols, title=None, axis=alt.Axis(labelAngle=-30)),
+        y=alt.Y("var1:N", sort=spearman_cols, title=None),
+    )
+    _heat = _base.mark_rect(stroke="white", strokeWidth=2).encode(
+        # Diverging: blue = negative, red = positive, neutral grey at 0.
+        color=alt.Color(
+            "rho:Q",
+            scale=alt.Scale(domain=[-1, 0, 1], range=["#2166ac", "#e5e5e5", "#b2182b"]),
+            title="Spearman ρ",
+        ),
+        tooltip=[
+            "var1",
+            "var2",
+            alt.Tooltip("rho", format=".3f", title="ρ"),
+            "n",
+            alt.Tooltip("p", format=".2e"),
+            alt.Tooltip("p_holm", format=".2e", title="p (Holm)"),
+            alt.Tooltip("p_fdr", format=".2e", title="p (FDR, BH)"),
+        ],
+    )
+    _text = _base.mark_text(fontSize=13).encode(
+        text="label:N",
+        color=alt.condition("abs(datum.rho) > 0.6", alt.value("white"), alt.value("black")),
+    )
+    _side = 90 * len(spearman_cols)
+    mo.vstack(
+        [
+            mo.md(
+                f"**Spearman ρ**: {spearman_scope.value}, n = {spearman_long['n'][0]} "
+                f"({_caption})"
+            ),
+            (_heat + _text).properties(width=_side, height=_side),
+        ]
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.callout(
+        mo.md(r"""
+    **Conclusion.** Pooled over all species, the measurements form two opposing blocks. Bill
+    length, flipper length and body mass rise together (ρ = 0.58–0.84), and bill depth runs
+    against all three (ρ = −0.21 to −0.52). The negative block is an artefact of pooling:
+    Gentoo are the largest penguins but have the shallowest bills.
+
+    Within each species **every pair is positively correlated** (ρ = 0.33–0.60 in Adelie,
+    0.52–0.67 in Chinstrap, 0.65–0.76 in Gentoo; all Holm-adjusted p < 0.001). Within a
+    species, bigger birds are bigger on every measurement. This is the same Simpson's
+    paradox seen in Section 2, now visible for all bill-depth pairs. Pooling also inflates
+    the flipper length–body mass link (ρ = 0.84 pooled against 0.47–0.73 within species).
     """),
         kind="info",
     )
@@ -946,14 +1115,236 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 8. Discussion
+    ## 8. Principal component analysis
+
+    Principal component analysis (PCA) summarises the four body measurements in a few
+    uncorrelated axes, the principal components (PCs). Each PC is a weighted combination of the
+    measurements, and the weights are its **loadings**. PC1 captures the most variance, PC2 the
+    most of what remains, and so on. Measurements are standardised first (mean 0, sd 1), so grams
+    and millimetres count equally. Like the classifier, PCA does not see species or sex, so
+    any separation by group comes from the measurements alone.
+
+    The plot is a **biplot**. Dots are penguins (PC scores). Arrows are measurements, pointing in
+    the direction where that measurement increases; arrow length shows how strongly it correlates
+    with the two PCs shown. Arrows are rescaled to fit the dots, so compare them with each other,
+    not with the axis values. Choose the measurements, the PCs on each axis and the colour, and
+    drag on the plot to list the selected penguins.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo, numeric_cols):
+    pca_features = mo.ui.multiselect(numeric_cols, value=numeric_cols, label="Measurements")
+    pca_features
+    return (pca_features,)
+
+
+@app.cell(hide_code=True)
+def _(PCA, StandardScaler, mo, np, numeric_cols, pca_features, penguins, pl):
+    mo.stop(
+        len(pca_features.value) < 2,
+        mo.callout(mo.md("Select at least two measurements."), kind="warn"),
+    )
+    # Keep the notebook's column order regardless of the order features were picked in.
+    pca_cols = [_c for _c in numeric_cols if _c in pca_features.value]
+    _X = StandardScaler().fit_transform(penguins.select(pca_cols).to_numpy().astype(float))
+    pca_fit = PCA().fit(_X)
+    pca_pcs = [f"PC{_i + 1}" for _i in range(pca_fit.n_components_)]
+    pca_scores = penguins.hstack(pl.DataFrame(pca_fit.transform(_X), schema=pca_pcs))
+    # Loadings: weight of each standardised measurement in each PC (unit-length columns).
+    pca_loadings = pl.DataFrame(
+        {"feature": pca_cols, **{_pc: pca_fit.components_[_i] for _i, _pc in enumerate(pca_pcs)}}
+    )
+    # Correlation between each measurement and each PC (loading × sqrt(eigenvalue)); used for arrows.
+    pca_corr = pl.DataFrame(
+        {
+            "feature": pca_cols,
+            **{
+                _pc: pca_fit.components_[_i] * np.sqrt(pca_fit.explained_variance_[_i])
+                for _i, _pc in enumerate(pca_pcs)
+            },
+        }
+    )
+    pca_variance = pl.DataFrame(
+        {
+            "PC": pca_pcs,
+            "explained": pca_fit.explained_variance_ratio_,
+            "cumulative": np.cumsum(pca_fit.explained_variance_ratio_),
+        }
+    )
+    return pca_cols, pca_corr, pca_loadings, pca_pcs, pca_scores, pca_variance
+
+
+@app.cell(hide_code=True)
+def _(mo, pca_pcs):
+    pca_x = mo.ui.dropdown(pca_pcs, value="PC1", label="X axis")
+    pca_y = mo.ui.dropdown(pca_pcs, value="PC2", label="Y axis")
+    pca_color = mo.ui.dropdown(["species", "sex", "island", "year"], value="species", label="Colour by")
+    pca_show_loadings = mo.ui.switch(value=True, label="Show loadings")
+    mo.hstack([pca_x, pca_y, pca_color, pca_show_loadings], justify="start", gap=2)
+    return pca_color, pca_show_loadings, pca_x, pca_y
+
+
+@app.cell(hide_code=True)
+def _(
+    alt,
+    mo,
+    np,
+    pca_color,
+    pca_corr,
+    pca_scores,
+    pca_show_loadings,
+    pca_variance,
+    pca_x,
+    pca_y,
+    pl,
+):
+    _xc, _yc = pca_x.value, pca_y.value
+    _pct = dict(zip(pca_variance["PC"], pca_variance["explained"]))
+    # Explicit brush on the points layer: marimo does not add one to layered charts itself.
+    _brush = alt.selection_interval(encodings=["x", "y"])
+    _points = (
+        alt.Chart(pca_scores)
+        .mark_circle(size=50)
+        .encode(
+            x=alt.X(f"{_xc}:Q", title=f"{_xc} ({100 * _pct[_xc]:.1f}% of variance)"),
+            y=alt.Y(f"{_yc}:Q", title=f"{_yc} ({100 * _pct[_yc]:.1f}% of variance)"),
+            color=alt.Color(f"{pca_color.value}:N", title=pca_color.value),
+            tooltip=[
+                "species",
+                "island",
+                "sex",
+                "year",
+                alt.Tooltip(_xc, format=".2f"),
+                alt.Tooltip(_yc, format=".2f"),
+            ],
+            opacity=alt.condition(_brush, alt.value(0.75), alt.value(0.15)),
+        )
+        .add_params(_brush)
+    )
+    _chart = _points
+    if pca_show_loadings.value:
+        # Stretch the correlation arrows so the longest reaches ~85% of the furthest score.
+        _reach = 0.85 * max(pca_scores[_xc].abs().max(), pca_scores[_yc].abs().max())
+        _longest = np.hypot(pca_corr[_xc], pca_corr[_yc]).max()
+        _arrows = pca_corr.select(
+            "feature",
+            x0=pl.lit(0.0),
+            y0=pl.lit(0.0),
+            x=pl.col(_xc) * _reach / _longest,
+            y=pl.col(_yc) * _reach / _longest,
+            r_x=pl.col(_xc),
+            r_y=pl.col(_yc),
+        )
+        _tips = [
+            "feature",
+            alt.Tooltip("r_x", format=".2f", title=f"r with {_xc}"),
+            alt.Tooltip("r_y", format=".2f", title=f"r with {_yc}"),
+        ]
+        _a = alt.Chart(_arrows)
+        _lines = _a.mark_rule(color="#333", strokeWidth=2).encode(
+            x="x0:Q", y="y0:Q", x2="x:Q", y2="y:Q", tooltip=_tips
+        )
+        _heads = _a.mark_point(color="#333", filled=True, size=40, opacity=1).encode(
+            x="x:Q", y="y:Q", tooltip=_tips
+        )
+        _labels = _a.mark_text(fontSize=12, fontWeight="bold", dy=-9).encode(
+            x="x:Q", y="y:Q", text="feature:N"
+        )
+        _chart = alt.layer(_points, _lines, _heads, _labels)
+    pca_chart = mo.ui.altair_chart(_chart.properties(width=520, height=420))
+    mo.vstack([mo.md(f"### Biplot: {_xc} vs {_yc}"), pca_chart])
+    return (pca_chart,)
+
+
+@app.cell(hide_code=True)
+def _(mo, pca_chart, pca_scores):
+    # apply_selection works for both the plain and the layered (with loadings) chart.
+    _picked = pca_chart.apply_selection(pca_scores)
+    _rows = _picked if 0 < _picked.height < pca_scores.height else pca_scores
+    mo.vstack([mo.md(f"### Selected penguins ({_rows.height})"), mo.ui.table(_rows)])
+    return
+
+
+@app.cell(hide_code=True)
+def _(alt, mo, pca_cols, pca_loadings, pca_pcs, pca_variance):
+    _scree_base = alt.Chart(pca_variance).encode(x=alt.X("PC:N", sort=pca_pcs, title=None))
+    _scree = (
+        _scree_base.mark_bar(color="#4c78a8").encode(
+            y=alt.Y("explained:Q", axis=alt.Axis(format="%"), title="Variance explained"),
+            tooltip=[
+                "PC",
+                alt.Tooltip("explained", format=".1%"),
+                alt.Tooltip("cumulative", format=".1%"),
+            ],
+        )
+        + _scree_base.mark_line(color="#e45756", point=True).encode(y="cumulative:Q")
+    ).properties(width=260, height=220, title="Scree plot (line = cumulative)")
+
+    _load_long = pca_loadings.unpivot(index="feature", variable_name="PC", value_name="loading")
+    _lbase = alt.Chart(_load_long).encode(
+        x=alt.X("PC:N", sort=pca_pcs, title=None),
+        y=alt.Y("feature:N", sort=pca_cols, title=None),
+    )
+    _load_heat = (
+        _lbase.mark_rect(stroke="white", strokeWidth=2).encode(
+            color=alt.Color(
+                "loading:Q",
+                scale=alt.Scale(domain=[-1, 0, 1], range=["#2166ac", "#e5e5e5", "#b2182b"]),
+                title="Loading",
+            ),
+            tooltip=["feature", "PC", alt.Tooltip("loading", format=".3f")],
+        )
+        + _lbase.mark_text(fontSize=12).encode(
+            text=alt.Text("loading:Q", format=".2f"),
+            color=alt.condition("abs(datum.loading) > 0.6", alt.value("white"), alt.value("black")),
+        )
+    ).properties(width=70 * len(pca_pcs), height=45 * len(pca_cols), title="Loadings")
+    mo.hstack([_scree, _load_heat], justify="start", gap=2)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.callout(
+        mo.md(r"""
+    **Conclusion.** With all four measurements, two components hold 88% of the variance and three
+    hold 97%.
+
+    - **PC1 (69%) is overall size.** Flipper length, body mass and bill length load positively and
+      bill depth negatively (r = 0.96, 0.91, 0.75, −0.66). It separates Gentoo (large, shallow
+      bills) from the other two species, the same split seen in Sections 5–7.
+    - **PC2 (20%) is bill size.** Bill depth and bill length both load positively (r = 0.70, 0.53),
+      with almost no contribution from body size. Within each species, males score about one unit
+      higher than females, so PC2 carries much of the sex difference from Section 4. Colour by sex
+      to see this.
+    - **PC3 (9%) separates Adelie from Chinstrap.** It contrasts bill length with body mass, so it
+      picks out birds with long bills for their size. Chinstrap score high and Adelie low. Plot
+      PC1 against PC3 to see all three species apart.
+
+    Adelie and Chinstrap overlap on PC1 and PC2, because the information that splits them is
+    mostly in the 9% of variance on PC3. This is why the classifier's few errors are all between
+    these two species (Section 6).
+    """),
+        kind="info",
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 9. Discussion
 
     **Main findings**
 
     1. **Species dominates the variation.** Species accounts for most of the variation in every
        body measurement and is almost completely confounded with island. Analyses that pool
        species can give misleading results, such as the reversed sign of the bill length–bill
-       depth correlation (Section 2).
+       depth correlation (Section 2). In a PCA of the four measurements, the first
+       component (overall size, 69% of the variance) mainly separates Gentoo from the
+       other two species (Section 8).
     2. **Sexual dimorphism is consistent but not uniform.** Males are larger on every
        measurement in every species. The bill difference is similar across species (about
        8–10%), but the body-mass difference ranges from 12% in Chinstrap to 20% in Adelie
